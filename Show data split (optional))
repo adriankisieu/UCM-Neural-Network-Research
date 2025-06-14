@@ -1,0 +1,10 @@
+import torchvision
+from torchvision import datasets
+
+# Load MNIST data
+train_data = datasets.MNIST(root='./data', train=True, download=True)
+test_data = datasets.MNIST(root='./data', train=False, download=True)
+
+# Check the sizes of the datasets
+print(f"Training set size: {len(train_data)} samples")
+print(f"Test set size: {len(test_data)} samples")
