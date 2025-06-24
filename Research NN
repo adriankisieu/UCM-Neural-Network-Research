@@ -67,7 +67,6 @@ optimizer = optim.SGD(model.parameters(), lr=0.01)
 
 # Training loop
 for epoch in range(5):  # of epochs
-    model.train()
     total_loss = 0
     for images, labels in train_loader:
         images, labels = images.to(device), labels.to(device)
@@ -87,7 +86,6 @@ for epoch in range(5):  # of epochs
     print(f"Epoch {epoch+1}, Loss: {total_loss:.4f}")
 
 # Evaluate on test data
-model.eval()
 correct = 0
 total = 0
 with torch.no_grad():
