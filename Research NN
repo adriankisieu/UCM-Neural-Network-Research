@@ -42,54 +42,88 @@ class Net(nn.Module):
 input_size = 28 * 28
 hidden_size = 500
 output_size = 10
-model = Net(input_size, hidden_size, output_size)
-
-criterion = nn.CrossEntropyLoss(reduction='sum')  # <<< KEY CHANGE
-optimizer = optim.SGD(model.parameters(), lr=0.001)
-
-# Training loop 
 num_iterations = 2000000
-loss_dict = {}
-test_dict = {}
 
-for i in range(1, num_iterations + 1):
-    idx = torch.randint(0, x_train_tensor.size(0), (1,)).item()
-    inputs = x_train_tensor[idx].unsqueeze(0)  # shape: (1, 1, 28, 28)
-    label = y_train_tensor[idx].unsqueeze(0)
+# Store results across runs
+all_losses = []
+all_accuracies = []
 
-    optimizer.zero_grad()
-    outputs = model(inputs)  # Flatten happens inside model
-    loss = criterion(outputs, label)
-    loss.backward()
-    optimizer.step()
+for run in range(16):
+    print(f"\n--- Run {run + 1} ---")
 
-    if i % 1000 == 0:
-        with torch.no_grad():
-            preds = model(x_test_tensor).argmax(1)
-            acc = (preds == y_test_tensor).float().mean().item()
+    model = Net(input_size, hidden_size, output_size)
+    criterion = nn.CrossEntropyLoss(reduction='sum')
+    optimizer = optim.SGD(model.parameters(), lr=0.001)
 
-            logits = model(x_train_tensor)
-            total_loss = criterion(logits, y_train_tensor).item()  # now exactly matches manual sum
+    loss_dict = {}
+    test_dict = {}
 
-            print(f"Trained for {i} times, loss = {total_loss:.4f}, test = {acc:.4f}")
-            loss_dict[str(i)] = total_loss
-            test_dict[str(i)] = acc
+    for i in range(1, num_iterations + 1):
+        idx = torch.randint(0, x_train_tensor.size(0), (1,)).item()
+        inputs = x_train_tensor[idx].unsqueeze(0)
+        label = y_train_tensor[idx].unsqueeze(0)
 
-# Save weights
-np.savetxt('Layer1', model.fc1.weight.detach().numpy())
-np.savetxt('Layer2', model.fc2.weight.detach().numpy())
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, label)
+        loss.backward()
+        optimizer.step()
 
-# Plot
-plt.plot(loss_dict.keys(), loss_dict.values())
-plt.ylabel('Loss function')
-plt.xlabel('Number of iterations')
-plt.xticks(rotation=60)
-plt.title('Loss function w.r.t. number of iterations')
+        if i % 1000 == 0:
+            with torch.no_grad():
+                preds = model(x_test_tensor).argmax(1)
+                acc = (preds == y_test_tensor).float().mean().item()
+
+                logits = model(x_train_tensor)
+                total_loss = criterion(logits, y_train_tensor).item()
+
+                print(f"Trained for {i} times, loss = {total_loss:.4f}, test = {acc:.4f}")
+                loss_dict[str(i)] = total_loss
+                test_dict[str(i)] = acc
+
+    all_losses.append(list(loss_dict.values()))
+    all_accuracies.append(list(test_dict.values()))
+
+    # Print weights in your preferred format
+    print(f"\n--- Weights after Run {run + 1} ---\n")
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"{name} shape: {param.shape}")
+            data = param.data.cpu().numpy()
+            print(data[:5, :5] if data.ndim == 2 else data[:5])
+            print()
+
+# Overlapping loss curves
+epochs = list(range(1000, num_iterations + 1, 1000))
+
+plt.figure()
+for losses in all_losses:
+    plt.plot(epochs, losses, alpha=0.6)
+plt.ylabel('Loss')
+plt.xlabel('Iterations')
+plt.title('Loss over 16 Runs')
+plt.grid(True)
 plt.show()
 
-plt.plot(test_dict.keys(), test_dict.values())
-plt.ylabel('Test Accuracy')
-plt.xlabel('Number of iterations')
-plt.xticks(rotation=60)
-plt.title('Test accuracy w.r.t. number of iterations')
+# overlapping accuracy curves
+plt.figure()
+for accs in all_accuracies:
+    plt.plot(epochs, accs, alpha=0.6)
+plt.ylabel('Accuracy')
+plt.xlabel('Iterations')
+plt.title('Accuracy over 16 Runs')
+plt.grid(True)
 plt.show()
+
+loss_array = np.array(all_losses)
+acc_array = np.array(all_accuracies)
+
+# Mean & std across runs at each epoch
+mean_loss = loss_array.mean(axis=0)
+std_loss = loss_array.std(axis=0)
+mean_acc = acc_array.mean(axis=0)
+std_acc = acc_array.std(axis=0)
+
+print("\n--- Final Epoch Statistics ---")
+print(f"Loss:  mean = {mean_loss[-1]:.4f}, std = {std_loss[-1]:.4f}")
+print(f"Acc:   mean = {mean_acc[-1]:.4f}, std = {std_acc[-1]:.4f}")
