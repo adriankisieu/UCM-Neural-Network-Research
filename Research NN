@@ -5,125 +5,187 @@ import torch.optim as optim
 import h5py
 import numpy as np
 import matplotlib.pyplot as plt
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, random_split
+import math
+from numpy import loadtxt
 
-# Load MNIST data
-MNIST_data = h5py.File('/Users/adikisieu/Downloads/MNISTdata.hdf5', 'r')
+# === Load MNIST data ===
+MNIST_data = h5py.File('/home/akisieu/MNISTdata.hdf5', 'r')
 x_train = np.float32(MNIST_data['x_train'][:])
 y_train = np.int64(MNIST_data['y_train'][:, 0])
 x_test = np.float32(MNIST_data['x_test'][:])
 y_test = np.int64(MNIST_data['y_test'][:, 0])
 MNIST_data.close()
 
-# Reshape and convert
-x_train_tensor = torch.tensor(x_train).reshape(-1, 1, 28, 28)
-y_train_tensor = torch.tensor(y_train)
-x_test_tensor = torch.tensor(x_test).reshape(-1, 1, 28, 28)
-y_test_tensor = torch.tensor(y_test)
+x_all = torch.tensor(np.concatenate([x_train, x_test], axis=0)).reshape(-1, 1, 28, 28)
+y_all = torch.tensor(np.concatenate([y_train, y_test], axis=0))
 
-# Define model
+full_dataset = TensorDataset(x_all, y_all)
+train_size = int(0.8 * len(full_dataset))
+test_size = len(full_dataset) - train_size
+train_dataset, test_dataset = random_split(full_dataset, [train_size, test_size])
+
+train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
+test_x, test_y = zip(*test_dataset)
+x_test_tensor = torch.stack(test_x)
+y_test_tensor = torch.tensor(test_y)
+
+# === Define model ===
 class Net(nn.Module):
     def __init__(self, input_size, hidden_size, output_size):
         super(Net, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, output_size)
-
         self.fc1.weight.data = torch.randn_like(self.fc1.weight) / torch.sqrt(torch.tensor(self.fc1.in_features, dtype=torch.float))
         self.fc2.weight.data = torch.randn_like(self.fc2.weight) / torch.sqrt(torch.tensor(self.fc2.in_features, dtype=torch.float))
         self.fc1.bias.data = torch.zeros_like(self.fc1.bias)
         self.fc2.bias.data = torch.zeros_like(self.fc2.bias)
 
     def forward(self, x):
-        x = x.view(-1, 28*28)
+        x = x.view(-1, 28 * 28)
         x = F.relu(self.fc1(x))
         return self.fc2(x)
 
-# Init
+# === Initial training ===
 input_size = 28 * 28
 hidden_size = 500
 output_size = 10
-num_iterations = 2000000
+model = Net(input_size, hidden_size, output_size)
 
-# Store results across runs
-all_losses = []
-all_accuracies = []
+# >>> added for gpu <<<
+device = torch.device("cuda")
+model = model.to(device)
+x_all = x_all.to(device)
+y_all = y_all.to(device)
+x_test_tensor = x_test_tensor.to(device)
+y_test_tensor = y_test_tensor.to(device)
 
-for run in range(16):
-    print(f"\n--- Run {run + 1} ---")
+criterion = nn.CrossEntropyLoss(reduction='sum')
+optimizer = optim.SGD(model.parameters(), lr=0.001)
 
-    model = Net(input_size, hidden_size, output_size)
-    criterion = nn.CrossEntropyLoss(reduction='sum')
-    optimizer = optim.SGD(model.parameters(), lr=0.001)
+num_epochs = 2000
+loss_dict = {}
+test_dict = {}
 
-    loss_dict = {}
-    test_dict = {}
-
-    for i in range(1, num_iterations + 1):
-        idx = torch.randint(0, x_train_tensor.size(0), (1,)).item()
-        inputs = x_train_tensor[idx].unsqueeze(0)
-        label = y_train_tensor[idx].unsqueeze(0)
+for epoch in range(1, num_epochs + 1):
+    for inputs, labels in train_loader:
+        # >>> move batch to gpu <<<
+        inputs = inputs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
 
         optimizer.zero_grad()
         outputs = model(inputs)
-        loss = criterion(outputs, label)
+        loss = criterion(outputs, labels)
         loss.backward()
         optimizer.step()
 
-        if i % 1000 == 0:
-            with torch.no_grad():
-                preds = model(x_test_tensor).argmax(1)
-                acc = (preds == y_test_tensor).float().mean().item()
+    with torch.no_grad():
+        preds = model(x_test_tensor).argmax(1)
+        acc = (preds == y_test_tensor).float().mean().item()
+        logits = model(x_all)
+        total_loss = criterion(logits, y_all).item()
+        print(f"Epoch {epoch}, loss = {total_loss:.4f}, test = {acc:.4f}")
+        loss_dict[str(epoch)] = total_loss
+        test_dict[str(epoch)] = acc
 
-                logits = model(x_train_tensor)
-                total_loss = criterion(logits, y_train_tensor).item()
+# === Save weights ===
+layer1_weights = model.fc1.weight.detach().cpu().numpy()
+layer2_weights = model.fc2.weight.detach().cpu().numpy()
+np.savetxt('Layer1', layer1_weights)
+np.savetxt('Layer2', layer2_weights)
 
-                print(f"Trained for {i} times, loss = {total_loss:.4f}, test = {acc:.4f}")
-                loss_dict[str(i)] = total_loss
-                test_dict[str(i)] = acc
+# === Layer 1 Normalization (fast but exact) ===
+data1 = loadtxt('Layer1', dtype=float).ravel()
+data2 = loadtxt('New Conductance.txt', dtype=float)
+data3 = loadtxt('New Conductance.txt', dtype=float)
 
-    all_losses.append(list(loss_dict.values()))
-    all_accuracies.append(list(test_dict.values()))
+A1, A2 = np.meshgrid(data2, data3, indexing='ij')
+A1_flat = A1.ravel()
+A2_flat = A2.ravel()
+B_flat = (((A1_flat - A2_flat) + 0.000278) / 0.000556) * 0.732311311 - 0.467950546463868
 
-    # Print weights in your preferred format
-    print(f"\n--- Weights after Run {run + 1} ---\n")
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            print(f"{name} shape: {param.shape}")
-            data = param.data.cpu().numpy()
-            print(data[:5, :5] if data.ndim == 2 else data[:5])
-            print()
+idx = np.abs(B_flat[:, None] - data1[None, :]).argmin(axis=0)
 
-# Overlapping loss curves
-epochs = list(range(1000, num_iterations + 1, 1000))
+C0 = B_flat[idx]
+C1 = A1_flat[idx]
+C2 = A2_flat[idx]
+D = C0.reshape(500, 784)
 
-plt.figure()
-for losses in all_losses:
-    plt.plot(epochs, losses, alpha=0.6)
-plt.ylabel('Loss')
-plt.xlabel('Iterations')
-plt.title('Loss over 16 Runs')
-plt.grid(True)
+np.savetxt('Layer1Adjusted', np.stack([C0, C1, C2], axis=1))
+np.savetxt('S_Layer1Adjusted', D)
+
+# === Layer 2 Normalization (fast but exact) ===
+data1 = loadtxt('Layer2', dtype=float).ravel()
+data2 = loadtxt('New Conductance.txt', dtype=float)
+data3 = loadtxt('New Conductance.txt', dtype=float)
+
+A1, A2 = np.meshgrid(data2, data3, indexing='ij')
+A1_flat = A1.ravel()
+A2_flat = A2.ravel()
+B_flat = (((A1_flat - A2_flat) + 0.000278) / 0.000556) * 2.006037209594910 - 1.014050806418950
+
+idx = np.abs(B_flat[:, None] - data1[None, :]).argmin(axis=0)
+
+C0 = B_flat[idx]
+C1 = A1_flat[idx]
+C2 = A2_flat[idx]
+D2 = C0.reshape(10, 500)
+
+np.savetxt('Layer2Adjusted', np.stack([C0, C1, C2], axis=1))
+np.savetxt('S_Layer2Adjusted', D2)
+
+# === Create new model using adjusted weights ===
+adjusted_model = Net(input_size, hidden_size, output_size)
+
+# >>> move adjusted model + tensors to gpu <<<
+adjusted_model = adjusted_model.to(device)
+adjusted_model.fc1.weight.data = torch.tensor(D, dtype=torch.float, device=device)
+adjusted_model.fc2.weight.data = torch.tensor(D2, dtype=torch.float, device=device)
+adjusted_model.fc1.bias.data = torch.zeros_like(adjusted_model.fc1.bias)
+adjusted_model.fc2.bias.data = torch.zeros_like(adjusted_model.fc2.bias)
+
+optimizer = optim.SGD(adjusted_model.parameters(), lr=0.001)
+loss_dict = {}
+test_dict = {}
+
+for epoch in range(1, num_epochs + 1):
+    for inputs, labels in train_loader:
+        inputs = inputs.to(device, non_blocking=True)
+        labels = labels.to(device, non_blocking=True)
+
+        optimizer.zero_grad()
+        outputs = adjusted_model(inputs)
+        loss = criterion(outputs, labels)
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        preds = adjusted_model(x_test_tensor).argmax(1)
+        acc = (preds == y_test_tensor).float().mean().item()
+        logits = adjusted_model(x_all)
+        total_loss = criterion(logits, y_all).item()
+        print(f"ADJUSTED Epoch {epoch}, loss = {total_loss:.4f}, test = {acc:.4f}")
+        loss_dict[str(epoch)] = total_loss
+        test_dict[str(epoch)] = acc
+
+# === Plot results ===
+plt.plot(loss_dict.keys(), loss_dict.values())
+plt.ylabel('Loss function')
+plt.xlabel('Epoch')
+plt.xticks(rotation=60)
+plt.title('Loss function w.r.t. number of epochs (Adjusted)')
 plt.show()
 
-# overlapping accuracy curves
-plt.figure()
-for accs in all_accuracies:
-    plt.plot(epochs, accs, alpha=0.6)
-plt.ylabel('Accuracy')
-plt.xlabel('Iterations')
-plt.title('Accuracy over 16 Runs')
-plt.grid(True)
+plt.plot(test_dict.keys(), test_dict.values())
+plt.ylabel('Test Accuracy')
+plt.xlabel('Epoch')
+plt.xticks(rotation=60)
+plt.title('Test accuracy w.r.t. number of epochs (Adjusted)')
 plt.show()
 
-loss_array = np.array(all_losses)
-acc_array = np.array(all_accuracies)
+loss_values = np.array(list(loss_dict.values()))
+acc_values = np.array(list(test_dict.values()))
 
-# Mean & std across runs at each epoch
-mean_loss = loss_array.mean(axis=0)
-std_loss = loss_array.std(axis=0)
-mean_acc = acc_array.mean(axis=0)
-std_acc = acc_array.std(axis=0)
-
-print("\n--- Final Epoch Statistics ---")
-print(f"Loss:  mean = {mean_loss[-1]:.4f}, std = {std_loss[-1]:.4f}")
-print(f"Acc:   mean = {mean_acc[-1]:.4f}, std = {std_acc[-1]:.4f}")
+print("\n--- Final Statistics ---")
+print(f"Loss:  mean = {loss_values.mean():.4f}, std = {loss_values.std():.4f}")
+print(f"Acc:   mean = {acc_values.mean():.4f}, std = {acc_values.std():.4f}")
