@@ -1,192 +1,136 @@
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-import h5py
-import numpy as np
-import matplotlib.pyplot as plt
+import numpy as np, torch, torch.nn as nn, torch.nn.functional as F, torch.optim as optim, h5py, matplotlib.pyplot as plt
 from torch.utils.data import TensorDataset, DataLoader, random_split
-import math
 from numpy import loadtxt
 
-# === Load MNIST data ===
-MNIST_data = h5py.File('/home/akisieu/MNISTdata.hdf5', 'r')
-x_train = np.float32(MNIST_data['x_train'][:])
-y_train = np.int64(MNIST_data['y_train'][:, 0])
-x_test = np.float32(MNIST_data['x_test'][:])
-y_test = np.int64(MNIST_data['y_test'][:, 0])
-MNIST_data.close()
+# ------- Config -------
+RUNS = 16
+EPOCHS = 50
+BATCH_SIZE = 600
+EPOCH_START, EPOCH_END = 15, 50
+dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-x_all = torch.tensor(np.concatenate([x_train, x_test], axis=0)).reshape(-1, 1, 28, 28)
-y_all = torch.tensor(np.concatenate([y_train, y_test], axis=0))
-
-full_dataset = TensorDataset(x_all, y_all)
-train_size = int(0.8 * len(full_dataset))
-test_size = len(full_dataset) - train_size
-train_dataset, test_dataset = random_split(full_dataset, [train_size, test_size])
-
-train_loader = DataLoader(train_dataset, batch_size=64, shuffle=True)
-test_x, test_y = zip(*test_dataset)
-x_test_tensor = torch.stack(test_x)
-y_test_tensor = torch.tensor(test_y)
-
-# === Define model ===
+# ------- Model -------
 class Net(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(Net, self).__init__()
-        self.fc1 = nn.Linear(input_size, hidden_size)
-        self.fc2 = nn.Linear(hidden_size, output_size)
-        self.fc1.weight.data = torch.randn_like(self.fc1.weight) / torch.sqrt(torch.tensor(self.fc1.in_features, dtype=torch.float))
-        self.fc2.weight.data = torch.randn_like(self.fc2.weight) / torch.sqrt(torch.tensor(self.fc2.in_features, dtype=torch.float))
-        self.fc1.bias.data = torch.zeros_like(self.fc1.bias)
-        self.fc2.bias.data = torch.zeros_like(self.fc2.bias)
+    def __init__(self):
+        super().__init__()
+        self.fc1, self.fc2 = nn.Linear(28*28,500), nn.Linear(500,10)
+    def forward(self,x):
+        x = x.view(-1,28*28)
+        return self.fc2(F.relu(self.fc1(x)))
 
-    def forward(self, x):
-        x = x.view(-1, 28 * 28)
-        x = F.relu(self.fc1(x))
-        return self.fc2(x)
+# ------- Helpers (CCC) -------
+def nearest_rows(values, table):
+    sidx = np.argsort(table[:,0]); B, T = table[sidx,0], table[sidx,:]
+    pos = np.clip(np.searchsorted(B,values),1,len(B)-1)
+    left, right = pos-1, pos
+    choose = (np.abs(B[right]-values)<np.abs(B[left]-values))
+    return T[np.where(choose,right,left)]
 
-# === Initial training ===
-input_size = 28 * 28
-hidden_size = 500
-output_size = 10
-model = Net(input_size, hidden_size, output_size)
+def build_table_layer1(d2,d3):
+    diff=d2[:,None]-d3[None,:]
+    B=(((diff+0.000278)/0.000556)*0.732311311)-0.467950546463868
+    i,j=np.meshgrid(np.arange(len(d2)),np.arange(len(d3)),indexing='ij')
+    return np.column_stack([B.ravel(),d2[i].ravel(),d3[j].ravel()])
 
-# >>> added for gpu <<<
-device = torch.device("cuda")
-model = model.to(device)
-x_all = x_all.to(device)
-y_all = y_all.to(device)
-x_test_tensor = x_test_tensor.to(device)
-y_test_tensor = y_test_tensor.to(device)
+def build_table_layer2(d2,d3):
+    diff=d2[:,None]-d3[None,:]
+    B=(((diff+0.000278)/0.000556)*2.006037209594910)-1.014050806418950
+    i,j=np.meshgrid(np.arange(len(d2)),np.arange(len(d3)),indexing='ij')
+    return np.column_stack([B.ravel(),d2[i].ravel(),d3[j].ravel()])
 
-criterion = nn.CrossEntropyLoss(reduction='sum')
-optimizer = optim.SGD(model.parameters(), lr=0.001)
+# ------- One run -------
+def run_once(bs):
+    f = h5py.File('/Users/adikisieu/Downloads/MNISTdata.hdf5','r')
+    x_train,y_train=np.float32(f['x_train'][:]),np.int64(f['y_train'][:,0])
+    x_test,y_test=np.float32(f['x_test'][:]),np.int64(f['y_test'][:,0]); f.close()
 
-num_epochs = 2000
-loss_dict = {}
-test_dict = {}
+    x_all,y_all=torch.tensor(np.concatenate([x_train,x_test])).reshape(-1,1,28,28),torch.tensor(np.concatenate([y_train,y_test]))
+    full_ds=TensorDataset(x_all,y_all)
+    train_ds,test_ds=random_split(full_ds,[int(0.8*len(full_ds)), len(full_ds)-int(0.8*len(full_ds))])
+    train_loader=DataLoader(train_ds,batch_size=bs,shuffle=True)
+    x_test,y_test=zip(*test_ds); x_test,y_test=torch.stack(x_test).to(dev),torch.tensor(y_test).to(dev)
 
-for epoch in range(1, num_epochs + 1):
-    for inputs, labels in train_loader:
-        # >>> move batch to gpu <<<
-        inputs = inputs.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
+    d2=loadtxt('New Conductance.txt',dtype=float); d3=loadtxt('New Conductance.txt',dtype=float)
+    t1,t2=build_table_layer1(d2,d3),build_table_layer2(d2,d3)
 
-        optimizer.zero_grad()
-        outputs = model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
+    model=Net().to(dev)
+    crit, opt = nn.CrossEntropyLoss(reduction='sum'), optim.SGD(model.parameters(),lr=0.001)
 
-    with torch.no_grad():
-        preds = model(x_test_tensor).argmax(1)
-        acc = (preds == y_test_tensor).float().mean().item()
-        logits = model(x_all)
-        total_loss = criterion(logits, y_all).item()
-        print(f"Epoch {epoch}, loss = {total_loss:.4f}, test = {acc:.4f}")
-        loss_dict[str(epoch)] = total_loss
-        test_dict[str(epoch)] = acc
+    base_losses, base_accs, adj_losses, adj_accs = [], [], [], []
 
-# === Save weights ===
-layer1_weights = model.fc1.weight.detach().cpu().numpy()
-layer2_weights = model.fc2.weight.detach().cpu().numpy()
-np.savetxt('Layer1', layer1_weights)
-np.savetxt('Layer2', layer2_weights)
+    for epoch in range(1,EPOCHS+1):
+        # ---- Train baseline ----
+        model.train()
+        for xb,yb in train_loader:
+            xb,yb=xb.to(dev),yb.to(dev)
+            opt.zero_grad(); loss=crit(model(xb),yb); loss.backward(); opt.step()
 
-# === Layer 1 Normalization (fast but exact) ===
-data1 = loadtxt('Layer1', dtype=float).ravel()
-data2 = loadtxt('New Conductance.txt', dtype=float)
-data3 = loadtxt('New Conductance.txt', dtype=float)
+        # ---- Evaluate baseline ----
+        model.eval()
+        with torch.no_grad():
+            out=model(x_test)
+            base_acc=(out.argmax(1)==y_test).float().mean().item()
+            base_loss=crit(out,y_test).item()
 
-A1, A2 = np.meshgrid(data2, data3, indexing='ij')
-A1_flat = A1.ravel()
-A2_flat = A2.ravel()
-B_flat = (((A1_flat - A2_flat) + 0.000278) / 0.000556) * 0.732311311 - 0.467950546463868
+        # ---- Apply CCC ----
+        fc1=model.fc1.weight.detach().cpu().numpy()
+        fc2=model.fc2.weight.detach().cpu().numpy()
+        D1=nearest_rows(fc1.ravel(),t1)[:,0].reshape(500,784)
+        D2=nearest_rows(fc2.ravel(),t2)[:,0].reshape(10,500)
 
-idx = np.abs(B_flat[:, None] - data1[None, :]).argmin(axis=0)
+        adjusted=Net().to(dev)
+        adjusted.fc1.weight.data=torch.tensor(D1,dtype=torch.float32,device=dev)
+        adjusted.fc2.weight.data=torch.tensor(D2,dtype=torch.float32,device=dev)
+        adjusted.fc1.bias.data.zero_(); adjusted.fc2.bias.data.zero_()
 
-C0 = B_flat[idx]
-C1 = A1_flat[idx]
-C2 = A2_flat[idx]
-D = C0.reshape(500, 784)
+        adjusted.eval()
+        with torch.no_grad():
+            out_adj=adjusted(x_test)
+            adj_acc=(out_adj.argmax(1)==y_test).float().mean().item()
+            adj_loss=crit(out_adj,y_test).item()
 
-np.savetxt('Layer1Adjusted', np.stack([C0, C1, C2], axis=1))
-np.savetxt('S_Layer1Adjusted', D)
+        base_losses.append(base_loss); base_accs.append(base_acc)
+        adj_losses.append(adj_loss); adj_accs.append(adj_acc)
+        print(f"Epoch {epoch:02d} | Base loss={base_loss:.2f} acc={base_acc:.4f} | Adjusted loss={adj_loss:.2f} acc={adj_acc:.4f}")
 
-# === Layer 2 Normalization (fast but exact) ===
-data1 = loadtxt('Layer2', dtype=float).ravel()
-data2 = loadtxt('New Conductance.txt', dtype=float)
-data3 = loadtxt('New Conductance.txt', dtype=float)
+    return np.array(base_losses), np.array(base_accs), np.array(adj_losses), np.array(adj_accs)
 
-A1, A2 = np.meshgrid(data2, data3, indexing='ij')
-A1_flat = A1.ravel()
-A2_flat = A2.ravel()
-B_flat = (((A1_flat - A2_flat) + 0.000278) / 0.000556) * 2.006037209594910 - 1.014050806418950
+# ------- Main -------
+def main():
+    all_base_losses, all_base_accs, all_adj_losses, all_adj_accs = [], [], [], []
+    for run in range(RUNS):
+        print(f"\n--- Run {run+1} ---")
+        bL, bA, aL, aA = run_once(BATCH_SIZE)
+        all_base_losses.append(bL); all_base_accs.append(bA)
+        all_adj_losses.append(aL); all_adj_accs.append(aA)
 
-idx = np.abs(B_flat[:, None] - data1[None, :]).argmin(axis=0)
+    epochs = np.arange(EPOCH_START, EPOCH_END+1)
 
-C0 = B_flat[idx]
-C1 = A1_flat[idx]
-C2 = A2_flat[idx]
-D2 = C0.reshape(10, 500)
+    # --- Base Loss ---
+    plt.figure()
+    for i in range(RUNS): plt.plot(epochs, all_base_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Baseline Loss ')
+    plt.legend(); plt.savefig('base_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
-np.savetxt('Layer2Adjusted', np.stack([C0, C1, C2], axis=1))
-np.savetxt('S_Layer2Adjusted', D2)
+    # --- Base Accuracy ---
+    plt.figure()
+    for i in range(RUNS): plt.plot(epochs, all_base_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Baseline Accuracy ')
+    plt.legend(); plt.savefig('base_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
-# === Create new model using adjusted weights ===
-adjusted_model = Net(input_size, hidden_size, output_size)
+    # --- Adjusted Loss ---
+    plt.figure()
+    for i in range(RUNS): plt.plot(epochs, all_adj_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Adjusted Loss ')
+    plt.legend(); plt.savefig('adj_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
-# >>> move adjusted model + tensors to gpu <<<
-adjusted_model = adjusted_model.to(device)
-adjusted_model.fc1.weight.data = torch.tensor(D, dtype=torch.float, device=device)
-adjusted_model.fc2.weight.data = torch.tensor(D2, dtype=torch.float, device=device)
-adjusted_model.fc1.bias.data = torch.zeros_like(adjusted_model.fc1.bias)
-adjusted_model.fc2.bias.data = torch.zeros_like(adjusted_model.fc2.bias)
+    # --- Adjusted Accuracy ---
+    plt.figure()
+    for i in range(RUNS): plt.plot(epochs, all_adj_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Adjusted Accuracy ')
+    plt.legend(); plt.savefig('adj_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
-optimizer = optim.SGD(adjusted_model.parameters(), lr=0.001)
-loss_dict = {}
-test_dict = {}
+    print("\n✅ Done. Four zoomed graphs (epochs 15–50) generated.")
 
-for epoch in range(1, num_epochs + 1):
-    for inputs, labels in train_loader:
-        inputs = inputs.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
-        optimizer.zero_grad()
-        outputs = adjusted_model(inputs)
-        loss = criterion(outputs, labels)
-        loss.backward()
-        optimizer.step()
-
-    with torch.no_grad():
-        preds = adjusted_model(x_test_tensor).argmax(1)
-        acc = (preds == y_test_tensor).float().mean().item()
-        logits = adjusted_model(x_all)
-        total_loss = criterion(logits, y_all).item()
-        print(f"ADJUSTED Epoch {epoch}, loss = {total_loss:.4f}, test = {acc:.4f}")
-        loss_dict[str(epoch)] = total_loss
-        test_dict[str(epoch)] = acc
-
-# === Plot results ===
-plt.plot(loss_dict.keys(), loss_dict.values())
-plt.ylabel('Loss function')
-plt.xlabel('Epoch')
-plt.xticks(rotation=60)
-plt.title('Loss function w.r.t. number of epochs (Adjusted)')
-plt.show()
-
-plt.plot(test_dict.keys(), test_dict.values())
-plt.ylabel('Test Accuracy')
-plt.xlabel('Epoch')
-plt.xticks(rotation=60)
-plt.title('Test accuracy w.r.t. number of epochs (Adjusted)')
-plt.show()
-
-loss_values = np.array(list(loss_dict.values()))
-acc_values = np.array(list(test_dict.values()))
-
-print("\n--- Final Statistics ---")
-print(f"Loss:  mean = {loss_values.mean():.4f}, std = {loss_values.std():.4f}")
-print(f"Acc:   mean = {acc_values.mean():.4f}, std = {acc_values.std():.4f}")
-
+if __name__ == "__main__":
+    main()
