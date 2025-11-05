@@ -1,97 +1,142 @@
-import numpy as np, torch, torch.nn as nn, torch.nn.functional as F, torch.optim as optim, h5py, matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import h5py
+import matplotlib.pyplot as plt
 from torch.utils.data import TensorDataset, DataLoader, random_split
 from numpy import loadtxt
+import random
+import copy
 
 # ------- Config -------
 RUNS = 16
-EPOCHS = 50
+EPOCHS = 100
 BATCH_SIZE = 600
 EPOCH_START, EPOCH_END = 15, 50
+LR = 0.001
+SEED = 42
 dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ------- Reproducibility -------
+torch.manual_seed(SEED)
+np.random.seed(SEED)
+random.seed(SEED)
 
 # ------- Model -------
 class Net(nn.Module):
     def __init__(self):
         super().__init__()
-        self.fc1, self.fc2 = nn.Linear(28*28,500), nn.Linear(500,10)
-    def forward(self,x):
-        x = x.view(-1,28*28)
-        return self.fc2(F.relu(self.fc1(x)))
+        self.fc1 = nn.Linear(28 * 28, 500)
+        self.fc2 = nn.Linear(500, 10)
+        self._init_weights()
 
-# ------- Helpers (CCC) -------
-def nearest_rows(values, table):
-    sidx = np.argsort(table[:,0]); B, T = table[sidx,0], table[sidx,:]
-    pos = np.clip(np.searchsorted(B,values),1,len(B)-1)
-    left, right = pos-1, pos
-    choose = (np.abs(B[right]-values)<np.abs(B[left]-values))
-    return T[np.where(choose,right,left)]
+    def _init_weights(self):
+        for layer in self.modules():
+            if isinstance(layer, nn.Linear):
+                layer.weight.data = torch.randn_like(layer.weight) / np.sqrt(layer.in_features)
+                layer.bias.data.zero_()
 
-def build_table_layer1(d2,d3):
-    diff=d2[:,None]-d3[None,:]
-    B=(((diff+0.000278)/0.000556)*0.732311311)-0.467950546463868
-    i,j=np.meshgrid(np.arange(len(d2)),np.arange(len(d3)),indexing='ij')
-    return np.column_stack([B.ravel(),d2[i].ravel(),d3[j].ravel()])
+    def forward(self, x):
+        x = x.view(-1, 28 * 28)
+        x = F.relu(self.fc1(x))
+        return self.fc2(x)
 
-def build_table_layer2(d2,d3):
-    diff=d2[:,None]-d3[None,:]
-    B=(((diff+0.000278)/0.000556)*2.006037209594910)-1.014050806418950
-    i,j=np.meshgrid(np.arange(len(d2)),np.arange(len(d3)),indexing='ij')
-    return np.column_stack([B.ravel(),d2[i].ravel(),d3[j].ravel()])
+# ------- Signed mapping helper -------
+def map_signed_nearest(weights_np, device_vals_np):
+    dv = np.sort(device_vals_np)
+    w = weights_np.ravel()
+    sign = np.sign(w)
+    pos = np.clip(np.searchsorted(dv, np.abs(w)), 1, len(dv) - 1)
+    left, right = dv[pos - 1], dv[pos]
+    choose_right = (np.abs(right - np.abs(w)) < np.abs(left - np.abs(w)))
+    mapped = np.where(choose_right, right, left) * sign
+    return mapped.reshape(weights_np.shape)
 
 # ------- One run -------
 def run_once(bs):
-    f = h5py.File('/Users/adikisieu/Downloads/MNISTdata.hdf5','r')
-    x_train,y_train=np.float32(f['x_train'][:]),np.int64(f['y_train'][:,0])
-    x_test,y_test=np.float32(f['x_test'][:]),np.int64(f['y_test'][:,0]); f.close()
+    # Load MNIST
+    with h5py.File('/Users/adikisieu/Downloads/MNISTdata.hdf5', 'r') as f:
+        x_train = np.float32(f['x_train'][:])
+        y_train = np.int64(f['y_train'][:, 0])
+        x_test  = np.float32(f['x_test'][:])
+        y_test  = np.int64(f['y_test'][:, 0])
 
-    x_all,y_all=torch.tensor(np.concatenate([x_train,x_test])).reshape(-1,1,28,28),torch.tensor(np.concatenate([y_train,y_test]))
-    full_ds=TensorDataset(x_all,y_all)
-    train_ds,test_ds=random_split(full_ds,[int(0.8*len(full_ds)), len(full_ds)-int(0.8*len(full_ds))])
-    train_loader=DataLoader(train_ds,batch_size=bs,shuffle=True)
-    x_test,y_test=zip(*test_ds); x_test,y_test=torch.stack(x_test).to(dev),torch.tensor(y_test).to(dev)
+    x_all = torch.tensor(np.concatenate([x_train, x_test]), dtype=torch.float32).reshape(-1, 1, 28, 28)
+    y_all = torch.tensor(np.concatenate([y_train, y_test]), dtype=torch.long)
+    full_ds = TensorDataset(x_all, y_all)
+    n_train = int(0.8 * len(full_ds))
+    train_ds, test_ds = random_split(full_ds, [n_train, len(full_ds) - n_train], generator=torch.Generator().manual_seed(SEED))
+    train_loader = DataLoader(train_ds, batch_size=bs, shuffle=True, generator=torch.Generator().manual_seed(SEED))
 
-    d2=loadtxt('New Conductance.txt',dtype=float); d3=loadtxt('New Conductance.txt',dtype=float)
-    t1,t2=build_table_layer1(d2,d3),build_table_layer2(d2,d3)
+    x_test_t, y_test_t = zip(*test_ds)
+    x_test_t = torch.stack(x_test_t).to(dev)
+    y_test_t = torch.tensor(y_test_t).to(dev)
 
-    model=Net().to(dev)
-    crit, opt = nn.CrossEntropyLoss(reduction='sum'), optim.SGD(model.parameters(),lr=0.001)
+    # Load device and reference data
+    device_vals = loadtxt('New Conductance.txt', dtype=float)
+    ref1 = np.loadtxt('S_Layer1Adjusted', dtype=float)
+    ref2 = np.loadtxt('S_Layer2Adjusted', dtype=float)
+    print(f"Device conductances loaded: min={device_vals.min():.6f}, max={device_vals.max():.6f}")
+
+    # ---- Create identical random starting weights ----
+    base_init = Net().to(dev)
+    model_base = copy.deepcopy(base_init)
+    model_adj = copy.deepcopy(base_init)
+
+    # ---- Map adjusted model weights to conductances ----
+    fc1 = model_adj.fc1.weight.detach().cpu().numpy()
+    fc2 = model_adj.fc2.weight.detach().cpu().numpy()
+    D1 = map_signed_nearest(fc1, device_vals)
+    D2 = map_signed_nearest(fc2, device_vals)
+    #D1 = (D1 - D1.mean()) * (ref1.std() / (D1.std() + 1e-8)) + ref1.mean()
+    D2 = (D2 - D2.mean()) * (ref2.std() / (D2.std() + 1e-8)) + ref2.mean()
+    model_adj.fc1.weight.data = torch.tensor(D1, dtype=torch.float32, device=dev)
+    model_adj.fc2.weight.data = torch.tensor(D2, dtype=torch.float32, device=dev)
+
+    # ---- Define loss/opt for both ----
+    crit = nn.CrossEntropyLoss(reduction='sum')
+    opt_base = optim.SGD(model_base.parameters(), lr=LR)
+    opt_adj = optim.SGD(model_adj.parameters(), lr=LR)
 
     base_losses, base_accs, adj_losses, adj_accs = [], [], [], []
 
-    for epoch in range(1,EPOCHS+1):
-        # ---- Train baseline ----
-        model.train()
-        for xb,yb in train_loader:
-            xb,yb=xb.to(dev),yb.to(dev)
-            opt.zero_grad(); loss=crit(model(xb),yb); loss.backward(); opt.step()
+    # ---- Train both models independently ----
+    for epoch in range(1, EPOCHS + 1):
+        model_base.train()
+        model_adj.train()
+        for xb, yb in train_loader:
+            xb, yb = xb.to(dev), yb.to(dev)
 
-        # ---- Evaluate baseline ----
-        model.eval()
+            # baseline step
+            opt_base.zero_grad()
+            loss_b = crit(model_base(xb), yb)
+            loss_b.backward()
+            opt_base.step()
+
+            # adjusted step
+            opt_adj.zero_grad()
+            loss_a = crit(model_adj(xb), yb)
+            loss_a.backward()
+            opt_adj.step()
+
+        # ---- Evaluate both ----
+        model_base.eval()
+        model_adj.eval()
         with torch.no_grad():
-            out=model(x_test)
-            base_acc=(out.argmax(1)==y_test).float().mean().item()
-            base_loss=crit(out,y_test).item()
-
-        # ---- Apply CCC ----
-        fc1=model.fc1.weight.detach().cpu().numpy()
-        fc2=model.fc2.weight.detach().cpu().numpy()
-        D1=nearest_rows(fc1.ravel(),t1)[:,0].reshape(500,784)
-        D2=nearest_rows(fc2.ravel(),t2)[:,0].reshape(10,500)
-
-        adjusted=Net().to(dev)
-        adjusted.fc1.weight.data=torch.tensor(D1,dtype=torch.float32,device=dev)
-        adjusted.fc2.weight.data=torch.tensor(D2,dtype=torch.float32,device=dev)
-        adjusted.fc1.bias.data.zero_(); adjusted.fc2.bias.data.zero_()
-
-        adjusted.eval()
-        with torch.no_grad():
-            out_adj=adjusted(x_test)
-            adj_acc=(out_adj.argmax(1)==y_test).float().mean().item()
-            adj_loss=crit(out_adj,y_test).item()
+            out_b = model_base(x_test_t)
+            out_a = model_adj(x_test_t)
+            base_acc = (out_b.argmax(1) == y_test_t).float().mean().item()
+            adj_acc = (out_a.argmax(1) == y_test_t).float().mean().item()
+            base_loss = crit(out_b, y_test_t).item()
+            adj_loss = crit(out_a, y_test_t).item()
 
         base_losses.append(base_loss); base_accs.append(base_acc)
-        adj_losses.append(adj_loss); adj_accs.append(adj_acc)
-        print(f"Epoch {epoch:02d} | Base loss={base_loss:.2f} acc={base_acc:.4f} | Adjusted loss={adj_loss:.2f} acc={adj_acc:.4f}")
+        adj_losses.append(adj_loss);   adj_accs.append(adj_acc)
+
+        print(f"Epoch {epoch:02d} | Base acc={base_acc:.4f} loss={base_loss:.2f} | "
+              f"Adj acc={adj_acc:.4f} loss={adj_loss:.2f}")
 
     return np.array(base_losses), np.array(base_accs), np.array(adj_losses), np.array(adj_accs)
 
@@ -99,46 +144,22 @@ def run_once(bs):
 def main():
     all_base_losses, all_base_accs, all_adj_losses, all_adj_accs = [], [], [], []
     for run in range(RUNS):
-        print(f"\n--- Run {run+1} ---")
+        print(f"\n=== Run {run + 1} ===")
         bL, bA, aL, aA = run_once(BATCH_SIZE)
         all_base_losses.append(bL); all_base_accs.append(bA)
-        all_adj_losses.append(aL); all_adj_accs.append(aA)
+        all_adj_losses.append(aL);  all_adj_accs.append(aA)
 
-    epochs = np.arange(EPOCH_START, EPOCH_END+1)
+    epochs = np.arange(EPOCH_START, EPOCH_END + 1)
 
-    # --- Base Loss ---
     plt.figure()
     for i in range(RUNS):
-        plt.plot(epochs, all_base_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Baseline Loss')
-    plt.ylim(700, 1400)
-    plt.legend(); plt.savefig('base_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
+        plt.plot(epochs, all_base_accs[i][EPOCH_START-1:EPOCH_END], '--', label=f'Base Run {i+1}')
+        plt.plot(epochs, all_adj_accs[i][EPOCH_START-1:EPOCH_END], label=f'Adj Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Accuracy')
+    plt.title('Baseline vs Adjusted (NumPy-style Init)')
+    plt.ylim(0.95, 0.985)
+    plt.legend(); plt.savefig('numpy_init_train_acc.png', dpi=300, bbox_inches='tight'); plt.show()
 
-    # --- Base Accuracy ---
-    plt.figure()
-    for i in range(RUNS):
-        plt.plot(epochs, all_base_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Baseline Accuracy')
-    plt.ylim(0.968, 0.984)
-    plt.legend(); plt.savefig('base_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
-
-    # --- Adjusted Loss ---
-    plt.figure()
-    for i in range(RUNS):
-        plt.plot(epochs, all_adj_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Adjusted Loss')
-    plt.ylim(700, 1400)
-    plt.legend(); plt.savefig('adj_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
-
-    # --- Adjusted Accuracy ---
-    plt.figure()
-    for i in range(RUNS):
-        plt.plot(epochs, all_adj_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Adjusted Accuracy')
-    plt.ylim(0.968, 0.984)
-    plt.legend(); plt.savefig('adj_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
-
-    print("\n✅ Done. Four zoomed & scaled graphs (epochs 15–50) generated.")
 
 if __name__ == "__main__":
     main()
