@@ -108,29 +108,37 @@ def main():
 
     # --- Base Loss ---
     plt.figure()
-    for i in range(RUNS): plt.plot(epochs, all_base_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Baseline Loss ')
+    for i in range(RUNS):
+        plt.plot(epochs, all_base_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Baseline Loss')
+    plt.ylim(700, 1400)
     plt.legend(); plt.savefig('base_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
     # --- Base Accuracy ---
     plt.figure()
-    for i in range(RUNS): plt.plot(epochs, all_base_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Baseline Accuracy ')
+    for i in range(RUNS):
+        plt.plot(epochs, all_base_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Baseline Accuracy')
+    plt.ylim(0.968, 0.984)
     plt.legend(); plt.savefig('base_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
     # --- Adjusted Loss ---
     plt.figure()
-    for i in range(RUNS): plt.plot(epochs, all_adj_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Adjusted Loss ')
+    for i in range(RUNS):
+        plt.plot(epochs, all_adj_losses[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Loss'); plt.title('Adjusted Loss')
+    plt.ylim(700, 1400)
     plt.legend(); plt.savefig('adj_loss_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
     # --- Adjusted Accuracy ---
     plt.figure()
-    for i in range(RUNS): plt.plot(epochs, all_adj_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
-    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Adjusted Accuracy ')
+    for i in range(RUNS):
+        plt.plot(epochs, all_adj_accs[i][EPOCH_START-1:EPOCH_END], label=f'Run {i+1}')
+    plt.xlabel('Epoch'); plt.ylabel('Accuracy'); plt.title('Adjusted Accuracy')
+    plt.ylim(0.968, 0.984)
     plt.legend(); plt.savefig('adj_acc_zoomed.png', dpi=300, bbox_inches='tight'); plt.show(); plt.close()
 
-    print("\n✅ Done. Four zoomed graphs (epochs 15–50) generated.")
+    print("\n✅ Done. Four zoomed & scaled graphs (epochs 15–50) generated.")
 
 if __name__ == "__main__":
     main()
