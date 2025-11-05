@@ -11,8 +11,8 @@ import random
 import copy
 
 # ------- CONFIG -------
-RUNS = 4
-EPOCHS = 50
+RUNS = 16
+EPOCHS = 100
 BATCH_SIZE = 600
 EPOCH_START, EPOCH_END = 15, 50
 LR = 0.001
